@@ -123,3 +123,43 @@ dropped client support) — use the cable. Not enabled by default.
   otherwise fails with EACCES), `UDPInterface` type alias (rnsd
   spelling), and `ifac_netname`/`ifac_netkey` config aliases (previously
   silently dropped — an IFAC iface would have come up un-gated).
+## The BLE bearer: automagic bridge (RAK4631 / ESP32-S3 peripherals)
+
+Third medium, for the devices that have no wifi shout at all (RAK4631 =
+LoRa+BLE+USB) or are far from any AP. A Pi-class node runs
+`utils/system/ble_rnode_bridge.py` and any BLE in range "just works":
+
+- **The device side is a BLE peripheral advertisting the NUART-shaped
+  GATT service** (`6e400001-…`, RX `6e400002` host→device, TX `6e400003`
+  device→host notify) carrying the **same RNode KISS byte protocol it
+  speaks on USB**. No pairing: the firmware never requests security, and
+  the bridge never calls Pair — plain unencrypted GATT connect. Note:
+  RNode_Firmware's own BLE flavor ENFORCES MITM passkey pairing (ESP32
+  gates writes on `bt_client_authenticated()`; the nRF52 side deliberately
+  debonds "just works" pairs) and is Android-locked (python RNS has no
+  BLEInterface — Sideband's BLE RNode rides the Android-only
+  RNodeInterface). Ours intentionally drops the gate: trust rides
+  Reticulum — open medium + IFAC (same posture as the IBSS wifi shout),
+  packets RNS-crypto end to end.
+- **Automagic discovery**: the bridge scans for the service UUID, connects
+  to anything new (name-prefix filtered), and does the RNode DETECT
+  handshake over the KISS stream; RNS announces then propagate both ways.
+  Walking into range = a link, seconds later. No UI anywhere.
+- **Graceful out-of-range**: BLE supervision timeout drops the GATT
+  connection → the bridge detaches that interface and closes the PTY;
+  re-entry re-arms it. The bridge runs its OWN python-RNS instance (own
+  config dir, `share_instance = No`) and joins the mesh over the proven
+  loopback pattern (TCP client to the main crns host's :4242 server) —
+  the meshchat pattern, so the main host stays untouched.
+- **Load-bearing firmware contract** (proven by
+  `tests/test_ble_rnode_bridge.py` against a fake dongle): the device
+  must (1) answer DETECT with `DETECT_RESP`/FW 1.52/PLATFORM/MCU, AND
+  (2) **echo the radio-config commands back** (FREQUENCY/BANDWIDTH/
+  TXPOWER/SF/CR/RADIO_STATE) — python RNS's `validateRadioState` gates
+  `interface_ready` on the echo. Also: python RNS's probe SHARES the
+  boundary FEND between consecutive KISS frames (FEND cmd data FEND cmd
+  data FEND) — firmware parsers must treat a closing FEND as also
+  opening the next frame (the R1 responder already does).
+- Bandwidth class: BLE NUART ≈ up to ~10 KB/s — announces, paths and
+  small messages; big pushes ride the fastest elected path (wifi/
+  ESP-NOW/USB).
