@@ -30,6 +30,7 @@ from flask import Flask, request, jsonify, send_from_directory
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 sys.path.insert(0, os.path.join(REPO_ROOT, "python_packages"))
+from crns.errors import CallFailed  # noqa: E402 - python_packages first (see insert above)
 
 CRNS_LIB_DIR = os.path.join(REPO_ROOT, "crns_lib")
 if CRNS_LIB_DIR not in os.environ.get("CRNS_LIBRARY", ""):
@@ -38,7 +39,10 @@ if CRNS_LIB_DIR not in os.environ.get("CRNS_LIBRARY", ""):
         os.environ["CRNS_LIBRARY"] = os.path.join(CRNS_LIB_DIR, libs[0])
 
 STORAGE = os.environ.get("MICRO_STORAGE", os.path.join(REPO_ROOT, "microretcon", "storage"))
-CONFIG_PATH = os.environ.get("MICRO_CONFIG", os.path.join(REPO_ROOT, "retcon_profiles", "default.config"))
+CONFIG_PATH = os.environ.get(
+    "MICRO_CONFIG",
+    os.path.join(STORAGE, "device.config"),
+)  # a scratch copy under the storage dir — never the tracked profile template
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "static")
 
 SF_COMPRESSION = 0x00
@@ -299,11 +303,20 @@ def api_send():
     try:
         dest_bytes = bytes.fromhex(post.get("dest", ""))
     except ValueError:
-        return _error("bad_dest", "dest must be hex (32 bytes)", 400)
+        return _error("bad_dest", "dest must be hex (32 hex chars / 16 bytes)", 400)
+    if len(dest_bytes) != 16:
+        return _error("bad_dest", "dest must be 16 bytes (32 hex chars)", 400)
     # local destinations (the mock's second aspect) deliver on the spot —
     # a node has no path entry to itself
     local_dests = ret._registered.values()
-    if dest_bytes not in local_dests and not ret.has_path(dest_bytes):
+    try:
+        no_path = dest_bytes not in local_dests and not ret.has_path(dest_bytes)
+    except CallFailed as exc:
+        # the binding's _as_hash refuses any non-16-byte hash (tightened in
+        # crns beyond the vendored ABI the mock was written against) — the
+        # API contract says bad dest is a 400, not a 500
+        return _error("bad_dest", f"dest rejected: {exc}", 400)
+    if no_path:
         ret.request_path(dest_bytes)
         return _error("no_path", "no path yet — path request sent, retry shortly", 409)
     if "content_b64" in post:
